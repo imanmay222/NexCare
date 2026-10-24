@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { Button } from './ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Badge } from './ui/badge';
@@ -7,7 +7,6 @@ import { Alert, AlertDescription } from './ui/alert';
 import {
   FileText,
   Download,
-  Share2,
   Calendar,
   Pill,
   Activity,
@@ -18,11 +17,20 @@ import {
   Shield,
   RefreshCw,
   Eye,
-  Printer,
-  Axis3D
+  X,
+  LoaderCircle
 } from 'lucide-react';
 import axios from 'axios';
 import { useEffect } from 'react';
+import {
+  Dialog,
+  DialogContent,
+  DialogClose,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from './ui/dialog';
 
 interface User {
   id: string;
@@ -47,21 +55,66 @@ interface MedicalRecord {
   summary: string;
   details: any;
   status: 'final' | 'preliminary' | 'pending';
+  prescription?: Prescription;
+}
+
+interface PrescriptionMedicine {
+  medicineName?: string | null;
+  dosage?: string | null;
+  dosageUnit?: string | null;
+  form?: string | null;
+  route?: string | null;
+  frequency?: string | null;
+  duration?: string | null;
+  durationUnit?: string | null;
+  foodInstruction?: string | null;
+  instructions?: string | null;
 }
 
 interface Prescription {
   id: string;
-  date: string;
-  doctor: string;
-  medications: {
-    name: string;
-    dosage: string;
-    frequency: string;
-    duration: string;
-    instructions: string;
-  }[];
-  diagnosis: string;
+  a_id: string;
+  created_at: string;
+  title?: string | null;
+  symptoms?: string | null;
+  diagnosis?: string | null;
+  treatment?: string | null;
+  physical_examination?: string | null;
+  drug?: PrescriptionMedicine[] | null;
+  investigations?: string | null;
+  summary?: string | null;
+  follow_up_date?: string | null;
+  status?: string | null;
+  finalized_at?: string | null;
+  name?: string | null;
+  patient_name?: string | null;
+  patient_age?: number | null;
+  patient_gender?: string | null;
+  patient_id?: string | null;
 }
+
+interface ConsultationResponse {
+  data: Prescription[] | null;
+  success: boolean;
+}
+
+const displayPrescriptionDate = (value?: string | null): string => {
+  if (!value) return 'Not specified';
+  const datePart = value.slice(0, 10);
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(datePart)
+    ? new Date(`${datePart}T12:00:00`)
+    : new Date(value);
+  return Number.isNaN(date.getTime())
+    ? 'Not specified'
+    : date.toLocaleDateString('en-IN', {
+        day: '2-digit',
+        month: 'long',
+        year: 'numeric',
+      });
+};
+
+const prescriptionValue = (value?: string | null): string =>
+  value?.trim() || 'Not specified';
 
 interface VitalSigns {
   id: string;
@@ -88,7 +141,10 @@ interface MedicalSummary {
 }
 
 export function HealthRecords({ user, language, isOnline }: HealthRecordsProps) {
-  const [selectedRecord, setSelectedRecord] = useState<MedicalRecord | null>(null);
+  const [selectedPrescription, setSelectedPrescription] = useState<Prescription | null>(null);
+  const [isDownloadingPDF, setIsDownloadingPDF] = useState(false);
+  const [pdfError, setPdfError] = useState('');
+  const downloadLock = useRef(false);
   const [syncStatus, setSyncStatus] = useState<'synced' | 'pending' | 'syncing'>('synced');
 
   const translations = {
@@ -101,8 +157,7 @@ export function HealthRecords({ user, language, isOnline }: HealthRecordsProps) 
       vitals: "Vital Signs",
       summary: "Medical Summary",
       download: "Download",
-      share: "Share",
-      print: "Print",
+      viewPrescription: "View",
       view: "View Details",
       syncData: "Sync Data",
       lastSync: "Last synced",
@@ -136,8 +191,7 @@ export function HealthRecords({ user, language, isOnline }: HealthRecordsProps) 
       vitals: "महत्वपूर्ण संकेत",
       summary: "चिकित्सा सारांश",
       download: "डाउनलोड",
-      share: "साझा करें",
-      print: "प्रिंट",
+      viewPrescription: "देखें",
       view: "विवरण देखें",
       syncData: "डेटा सिंक करें",
       lastSync: "अंतिम बार सिंक",
@@ -171,8 +225,7 @@ export function HealthRecords({ user, language, isOnline }: HealthRecordsProps) 
       vitals: "ਮਹੱਤਵਪੂਰਨ ਸੰਕੇਤ",
       summary: "ਮੈਡੀਕਲ ਸਾਰਾਂਸ਼",
       download: "ਡਾਊਨਲੋਡ",
-      share: "ਸਾਂਝਾ ਕਰੋ",
-      print: "ਪ੍ਰਿੰਟ",
+      viewPrescription: "ਵੇਖੋ",
       view: "ਵੇਰਵੇ ਦੇਖੋ",
       syncData: "ਡੇਟਾ ਸਿੰਕ ਕਰੋ",
       lastSync: "ਆਖਰੀ ਵਾਰ ਸਿੰਕ",
@@ -319,17 +372,18 @@ export function HealthRecords({ user, language, isOnline }: HealthRecordsProps) 
 
     let fetchapi2 = async () => {
       try {
-        let response = await axios.get(`http://localhost:8090/patient/consultationdata`, {
-          withCredentials: true
-        });
-        let data = response.data.data;
-        let records: MedicalRecord[] = data.map((record: any) => ({
+        const response = await axios.get<ConsultationResponse>(
+          `http://localhost:8090/patient/consultationdata`,
+          { withCredentials: true }
+        );
+        const data = response.data.data ?? [];
+        let records: MedicalRecord[] = data.map((record) => ({
           id: record.id,
           type: 'consultation',
-          date: record.created_at.split("T")[0],
-          doctor: record.name,
-          title: record.title,
-          summary: record.summary,
+          date: record.created_at?.split("T")[0] ?? '',
+          doctor: record.name ?? '',
+          title: record.title ?? '',
+          summary: record.summary ?? '',
           details: {
             symptoms: record.symptoms,
             diagnosis: record.diagnosis,
@@ -338,17 +392,16 @@ export function HealthRecords({ user, language, isOnline }: HealthRecordsProps) 
           status: 'final'
         }));
         setMedicalRecords((prev) => [...prev, ...records]);
-        let prescriptions: MedicalRecord[] = data.map((record: any) => ({
+        const prescriptions: MedicalRecord[] = data.map((record) => ({
           id: record.id,
           type: 'prescription',
-          date: record.created_at.split("T")[0],
-          doctor: record.name,
-          title: `Prescription for ${record.title}`,
-          summary: `Medications prescribed for ${record.title}`,
-          details: {
-            medications: record.drug
-          },
-          status: 'final'
+          date: record.created_at?.split("T")[0] ?? '',
+          doctor: record.name ?? '',
+          title: `Prescription for ${record.title || 'consultation'}`,
+          summary: record.summary || `Prescription for ${record.title || 'consultation'}`,
+          details: { medications: record.drug ?? [] },
+          status: record.status?.toLowerCase() === 'draft' ? 'preliminary' : 'final',
+          prescription: record,
         }));
         setMedicalRecords((prev) => [...prev, ...prescriptions]);
       } catch (error) {
@@ -435,6 +488,50 @@ export function HealthRecords({ user, language, isOnline }: HealthRecordsProps) 
       case 'preliminary': return 'bg-yellow-100 text-yellow-800';
       case 'pending': return 'bg-gray-100 text-gray-800';
       default: return 'bg-gray-100 text-gray-800';
+    }
+  };
+
+  const handleDownloadPrescription = async (
+    prescription: Prescription | null = selectedPrescription
+  ) => {
+    if (!prescription || downloadLock.current) return;
+    downloadLock.current = true;
+    setIsDownloadingPDF(true);
+    setPdfError('');
+
+    try {
+      const response = await axios.get<Blob>(
+        `http://localhost:8090/patient/prescription/${encodeURIComponent(prescription.a_id)}/pdf`,
+        { withCredentials: true, responseType: 'blob' }
+      );
+      const objectURL = URL.createObjectURL(response.data);
+      const link = document.createElement('a');
+      link.href = objectURL;
+      link.download = `NexCare-Prescription-${prescription.a_id}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectURL), 1000);
+    } catch (error) {
+      let message = 'Unable to download the prescription PDF.';
+      if (axios.isAxiosError<Blob>(error)) {
+        const responseData: unknown = error.response?.data;
+        if (responseData instanceof Blob) {
+          const responseText = await responseData.text();
+          try {
+            const errorResponse = JSON.parse(responseText) as { Message?: string };
+            message = errorResponse.Message || message;
+          } catch {
+            message = error.message || message;
+          }
+        } else {
+          message = error.message || message;
+        }
+      }
+      setPdfError(message);
+    } finally {
+      downloadLock.current = false;
+      setIsDownloadingPDF(false);
     }
   };
 
@@ -635,6 +732,12 @@ export function HealthRecords({ user, language, isOnline }: HealthRecordsProps) 
               <CardTitle>{t.prescriptions}</CardTitle>
             </CardHeader>
             <CardContent>
+              {pdfError && (
+                <Alert variant="destructive" className="mb-4">
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertDescription>{pdfError}</AlertDescription>
+                </Alert>
+              )}
               <div className="space-y-4">
                 {medicalRecords.filter(r => r.type === 'prescription').map((record) => (
                   <div key={record.id} className="border rounded-lg p-4">
@@ -643,31 +746,50 @@ export function HealthRecords({ user, language, isOnline }: HealthRecordsProps) 
                         <h4 className="font-medium">{record.title}</h4>
                         <p className="text-sm text-gray-600">{record.date} - {record.doctor}</p>
                       </div>
-                      <div className="flex space-x-2">
-                        <Button variant="outline" size="sm">
-                          <Printer className="h-4 w-4 mr-2" />
-                          {t.print}
+                      <div className="flex shrink-0 gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={!record.prescription || isDownloadingPDF}
+                          onClick={() => handleDownloadPrescription(record.prescription ?? null)}
+                        >
+                          {isDownloadingPDF ? (
+                            <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />
+                          ) : (
+                            <Download className="mr-2 h-4 w-4" />
+                          )}
+                          {isDownloadingPDF ? 'Downloading...' : t.download}
                         </Button>
-                        <Button variant="outline" size="sm">
-                          <Share2 className="h-4 w-4 mr-2" />
-                          {t.share}
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={!record.prescription}
+                          onClick={() => {
+                            setPdfError('');
+                            setSelectedPrescription(record.prescription ?? null);
+                          }}
+                        >
+                          <Eye className="mr-2 h-4 w-4" />
+                          {t.viewPrescription}
                         </Button>
                       </div>
                     </div>
-                    {record.details?.medications && (
+                    {record.prescription?.drug?.length ? (
                       <div className="space-y-2">
-                        {record.details.medications.map((med: any, index: number) => (
+                        {record.prescription.drug.map((med, index) => (
                           <div key={index} className="p-3 bg-blue-50 rounded border-l-4 border-blue-500">
-                            <h5 className="font-medium">{med.name}</h5>
+                            <h5 className="font-medium">{prescriptionValue(med.medicineName)}</h5>
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-2 text-sm">
-                              <div><strong>{t.dosage}:</strong> {med.dosage}</div>
-                              <div><strong>{t.frequency}:</strong> {med.frequency}</div>
-                              <div><strong>Duration:</strong> {med.duration}</div>
-                              <div><strong>{t.instructions}:</strong> {med.instruction}</div>
+                              <div><strong>{t.dosage}:</strong> {prescriptionValue(med.dosage)} {med.dosageUnit ?? ''}</div>
+                              <div><strong>{t.frequency}:</strong> {prescriptionValue(med.frequency)}</div>
+                              <div><strong>Duration:</strong> {prescriptionValue(med.duration)} {med.durationUnit ?? ''}</div>
+                              <div><strong>{t.instructions}:</strong> {prescriptionValue(med.instructions)}</div>
                             </div>
                           </div>
                         ))}
                       </div>
+                    ) : (
+                      <p className="text-sm text-gray-500">No medicines recorded.</p>
                     )}
                   </div>
                 ))}
@@ -780,6 +902,233 @@ export function HealthRecords({ user, language, isOnline }: HealthRecordsProps) 
           </Card>
         </TabsContent>
       </Tabs>
+
+      <Dialog
+        open={selectedPrescription !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setSelectedPrescription(null);
+            setPdfError('');
+          }
+        }}
+      >
+        <DialogContent
+          className="!top-1/2 !left-1/2 !-translate-x-1/2 !-translate-y-1/2 !rounded-2xl !border-slate-200 !bg-slate-100 !shadow-2xl"
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 0,
+            width: 'calc(100vw - 2rem)',
+            maxWidth: '1000px',
+            height: 'min(90vh, 900px)',
+            maxHeight: 'calc(100vh - 2rem)',
+            overflow: 'hidden',
+            padding: 0,
+          }}
+        >
+          {selectedPrescription && (
+            <>
+              <DialogHeader className="shrink-0 border-b border-slate-200 bg-white px-5 py-4 pr-14 text-left sm:px-8">
+                <div className="flex items-center gap-3">
+                  <div className="rounded-xl bg-blue-700 p-2.5 text-white shadow-sm">
+                    <FileText className="h-5 w-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <DialogTitle className="text-lg font-bold text-slate-900 sm:text-xl">
+                      Digital prescription
+                    </DialogTitle>
+                    <DialogDescription className="mt-1 truncate">
+                      Appointment <span className="font-medium text-slate-700">{selectedPrescription.a_id}</span>
+                    </DialogDescription>
+                  </div>
+                </div>
+              </DialogHeader>
+
+              <div
+                className="w-full touch-pan-y overscroll-contain p-3 sm:p-6"
+                style={{
+                  flex: '1 1 0%',
+                  height: 0,
+                  minHeight: 0,
+                  overflowY: 'auto',
+                  WebkitOverflowScrolling: 'touch',
+                  overscrollBehaviorY: 'contain',
+                }}
+              >
+                <div className="mx-auto w-full max-w-4xl space-y-4">
+                  <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+                    <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-100 pb-4">
+                      <div>
+                        <p className="text-2xl font-extrabold tracking-tight text-blue-800">NexCare</p>
+                        <p className="mt-1 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+                          Digital prescription
+                        </p>
+                      </div>
+                      <Badge className={
+                        selectedPrescription.status?.toLowerCase() === 'draft'
+                          ? 'border-amber-200 bg-amber-50 px-3 py-1 text-amber-800'
+                          : 'border-emerald-200 bg-emerald-50 px-3 py-1 text-emerald-800'
+                      }>
+                        {prescriptionValue(selectedPrescription.status)}
+                      </Badge>
+                    </div>
+
+                    <div className="grid gap-x-8 gap-y-5 pt-5 sm:grid-cols-2 lg:grid-cols-3">
+                      <PrescriptionViewField label="Patient" value={selectedPrescription.patient_name || user.name} />
+                      <PrescriptionViewField label="Patient ID" value={selectedPrescription.patient_id} />
+                      <PrescriptionViewField label="Age" value={
+                        selectedPrescription.patient_age == null
+                          ? null
+                          : `${selectedPrescription.patient_age} years`
+                      } />
+                      <PrescriptionViewField label="Gender" value={selectedPrescription.patient_gender} />
+                      <PrescriptionViewField label="Prescribing doctor" value={selectedPrescription.name} />
+                      <PrescriptionViewField label="Prescription date" value={displayPrescriptionDate(selectedPrescription.created_at)} />
+                    </div>
+                  </section>
+
+                  <div className="grid items-start gap-4 lg:grid-cols-2">
+                    <PrescriptionViewSection title="Prescription Details">
+                      <div className="grid gap-4 sm:grid-cols-2">
+                        <PrescriptionViewField label="Prescription ID" value={selectedPrescription.id} />
+                        <PrescriptionViewField label="Appointment ID" value={selectedPrescription.a_id} />
+                        <PrescriptionViewField label="Title" value={selectedPrescription.title} />
+                        <PrescriptionViewField label="Diagnosis" value={selectedPrescription.diagnosis} />
+                        <div className="sm:col-span-2">
+                          <PrescriptionViewField label="Symptoms" value={selectedPrescription.symptoms} />
+                        </div>
+                      </div>
+                    </PrescriptionViewSection>
+
+                    <PrescriptionViewSection title="Clinical Information">
+                      <div className="space-y-4">
+                        <PrescriptionViewField label="Physical Examination" value={selectedPrescription.physical_examination} />
+                        <PrescriptionViewField label="Treatment / General Instructions" value={selectedPrescription.treatment} />
+                        <PrescriptionViewField label="Investigations" value={selectedPrescription.investigations} />
+                      </div>
+                    </PrescriptionViewSection>
+                  </div>
+
+                  <PrescriptionViewSection title="Medicines">
+                    {selectedPrescription.drug?.length ? (
+                      <div className="space-y-3">
+                        {selectedPrescription.drug.map((medicine, index) => (
+                          <article key={`${medicine.medicineName ?? 'medicine'}-${index}`} className="rounded-xl border border-slate-200 bg-slate-50 p-4 sm:p-5">
+                            <h4 className="mb-4 flex items-center gap-2 font-semibold text-slate-900">
+                              <span className="flex h-7 w-7 items-center justify-center rounded-full bg-blue-100 text-blue-800">
+                                <Pill className="h-4 w-4" />
+                              </span>
+                              {prescriptionValue(medicine.medicineName)}
+                            </h4>
+                            <div className="grid gap-x-6 gap-y-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
+                              <PrescriptionViewField label="Form" value={medicine.form} />
+                              <PrescriptionViewField label="Dosage" value={[medicine.dosage, medicine.dosageUnit].filter(Boolean).join(' ')} />
+                              <PrescriptionViewField label="Route" value={medicine.route} />
+                              <PrescriptionViewField label="Frequency" value={medicine.frequency} />
+                              <PrescriptionViewField label="Duration" value={[medicine.duration, medicine.durationUnit].filter(Boolean).join(' ')} />
+                              <PrescriptionViewField label="Food Instructions" value={medicine.foodInstruction} />
+                              <div className="sm:col-span-2">
+                                <PrescriptionViewField label="Instructions" value={medicine.instructions} />
+                              </div>
+                            </div>
+                          </article>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-sm text-slate-500">No medicines recorded.</p>
+                    )}
+                  </PrescriptionViewSection>
+
+                  <div className="grid items-start gap-4 sm:grid-cols-2">
+                    <PrescriptionViewSection title="Follow Up">
+                      <PrescriptionViewField
+                        label="Follow-up Date"
+                        value={displayPrescriptionDate(selectedPrescription.follow_up_date)}
+                      />
+                    </PrescriptionViewSection>
+
+                    <PrescriptionViewSection title="Prescription Status">
+                      <div className="grid gap-4 sm:grid-cols-2">
+                        <PrescriptionViewField label="Status" value={selectedPrescription.status} />
+                        {selectedPrescription.finalized_at && (
+                          <PrescriptionViewField
+                            label="Finalized At"
+                            value={displayPrescriptionDate(selectedPrescription.finalized_at)}
+                          />
+                        )}
+                      </div>
+                    </PrescriptionViewSection>
+                  </div>
+
+                  <PrescriptionViewSection title="Summary">
+                    <PrescriptionViewField label="Summary" value={selectedPrescription.summary} />
+                  </PrescriptionViewSection>
+
+                </div>
+              </div>
+
+              <DialogFooter className="shrink-0 border-t border-slate-200 bg-white px-4 py-3 sm:px-8">
+                <Button
+                  onClick={handleDownloadPrescription}
+                  disabled={isDownloadingPDF || !selectedPrescription.a_id}
+                  className="bg-blue-700 text-white hover:bg-blue-800"
+                >
+                  {isDownloadingPDF ? (
+                    <LoaderCircle className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Download className="h-4 w-4" />
+                  )}
+                  {isDownloadingPDF ? 'Downloading...' : 'Download PDF'}
+                </Button>
+                <DialogClose asChild>
+                  <Button variant="outline" aria-label="Close prescription">
+                    <X className="h-4 w-4" />
+                    Close
+                  </Button>
+                </DialogClose>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+function PrescriptionViewSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="min-w-0 rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+      <h3 className="mb-4 flex items-center gap-2 border-b border-slate-100 pb-3 text-xs font-bold uppercase tracking-[0.12em] text-slate-700">
+        <span className="h-4 w-1 rounded-full bg-blue-700" />
+        {title}
+      </h3>
+      {children}
+    </section>
+  );
+}
+
+function PrescriptionViewField({
+  label,
+  value,
+}: {
+  label: string;
+  value?: string | number | null;
+}) {
+  const displayValue =
+    value == null || String(value).trim() === ''
+      ? 'Not specified'
+      : String(value);
+
+  return (
+    <div className="min-w-0">
+      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</p>
+      <p className="mt-1 whitespace-pre-wrap break-words text-sm text-slate-800">{displayValue}</p>
     </div>
   );
 }

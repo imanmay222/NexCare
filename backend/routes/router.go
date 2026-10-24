@@ -28,6 +28,7 @@ func PatientRoutes(router *gin.Engine) {
 	patientGroup.GET("/healthmetrics", controller.GetHealthMetrics)
 	patientGroup.GET("/healthsummary", controller.GetHealthSummary)
 	patientGroup.GET("/consultationdata", controller.GetConsultationData) //precription  +  consultation.
+	patientGroup.GET("/prescription/:appointmentId/pdf", controller.DownloadPrescriptionPDF)
 	patientGroup.GET("/labResults", controller.GetLabResults)             //Lab results.
 	patientGroup.POST("/symptomChecker", controller.SymptomChecker)
 	patientGroup.PATCH("/updatePatientProfile", controller.UpdatePatientData)

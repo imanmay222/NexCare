@@ -63,27 +63,26 @@ type HealthSummary struct {
 	Lmp                time.Time  ` json:"lmp" `
 }
 
-type DrugType struct {
-	Name        string ` json:"name" `
-	Dosage      string ` json:"dosage" `
-	Duration    string ` json:"duration" `
-	Frequency   string ` json:"frequency" `
-	Instruction string ` json:"instruction" `
-}
-
 type Consultation struct {
-	Id         string    ` json:"id" binding:"required" `
-	Created_At time.Time ` json:"created_at" `
-	// A_id string ` json:"a_id" binding:"required" `
-	Title                string     ` json:"title" binding:"required" `
-	Symptoms             string     ` json:"symptoms" binding:"required" `
-	Diagnosis            string     ` json:"diagnosis" binding:"required" `
-	Treatment            string     ` json:"treatment" binding:"required" `
-	Physical_examination string     ` json:"physical_examination" binding:"required" `
-	Drug                 []DrugType ` json:"drug" binding:"required" `
-	Investigations       string     ` json:"investigations" `
-	Summary              *string    ` json:"summary" `
-	Name                 string     ` json:"name" `
+	Id                   string     `json:"id"`
+	A_id                 string     `json:"a_id"`
+	Created_At           time.Time  `json:"created_at"`
+	Title                string     `json:"title"`
+	Symptoms             string     `json:"symptoms"`
+	Diagnosis            string     `json:"diagnosis"`
+	Treatment            string     `json:"treatment"`
+	Physical_examination string     `json:"physical_examination"`
+	Drug                 []Medicine `json:"drug"`
+	Investigations       string     `json:"investigations"`
+	Summary              *string    `json:"summary"`
+	Name                 string     `json:"name"`
+	Follow_Up_Date       *time.Time `json:"follow_up_date"`
+	Status               *string    `json:"status"`
+	Finalized_At         *time.Time `json:"finalized_at"`
+	Patient_Name         string     `json:"patient_name"`
+	Patient_Age          *int64     `json:"patient_age"`
+	Patient_Gender       string     `json:"patient_gender"`
+	Patient_ID           string     `json:"patient_id"`
 }
 
 type TestValues struct {

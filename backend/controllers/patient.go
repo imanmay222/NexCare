@@ -2,17 +2,23 @@ package controllers
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	conn "nexcare/backend/config"
 	"nexcare/backend/models"
+	"nexcare/backend/util"
 	// "os/user"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"log"
 	ai "nexcare/backend/AI"
+	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func GetPatientInfo(ctx *gin.Context) {
@@ -54,7 +60,7 @@ func GetAppointment(ctx *gin.Context) {
 	//get the  upcoming appointment details for patients
 	query_param := ctx.Query("isAll")
 	log.Println("----->Query param isAll : ", query_param)
-	
+
 	userID := ctx.GetString("userID")
 	q1 := " select a.id,a.d_id,a.date,u.name,a.status,a.symptoms,a.time,a.consultation_type from users u inner join appointment a on u.id=a.d_id where u.role=$1 and p_id=$2 AND a.date>=CURRENT_DATE order by a.date,a.time desc limit 3 "
 	rows, err := conn.DB.Query(context.Background(), q1, "doctor", userID)
@@ -209,33 +215,136 @@ func GetHealthSummary(ctx *gin.Context) {
 }
 
 func GetConsultationData(ctx *gin.Context) {
-	fmt.Println("Welcome to Consultation Data")
 	userID := ctx.GetString("userID")
-	q1 := ` select c.id,c.created_at,c.title,c.symptoms,c.diagnosis,c.treatment,c.physical_examination,c.drug,c.investigations,c.summary,u.name from consultation c inner join appointment a on a.id=c.a_id inner join users u on a.d_id=u.id where a.p_id= $1 `
+	q1 := `select c.id,c.a_id,c.created_at,coalesce(c.title,''),coalesce(c.symptoms,''),coalesce(c.diagnosis,''),coalesce(c.treatment,''),coalesce(c.physical_examination,''),coalesce(c.drug,'[]'::jsonb),coalesce(c.investigations,''),c.summary,coalesce(d.name,''),c.follow_up_date,coalesce(c.status,'Draft'),c.finalized_at,coalesce(p.name,''),p.age,coalesce(p.gender,''),coalesce(p.gen_id,'') from consultation c inner join appointment a on a.id=c.a_id inner join users d on a.d_id=d.id inner join users p on a.p_id=p.id where a.p_id=$1 `
 	rows, err := conn.DB.Query(context.Background(), q1, userID)
 	if err != nil {
 		ctx.IndentedJSON(500, gin.H{"Message": err.Error(), "success": false})
 		return
 	}
+	defer rows.Close()
 	var consultData []model.Consultation
-	var drugData []byte
 	for rows.Next() {
 		var data model.Consultation
-		err := rows.Scan(&data.Id, &data.Created_At, &data.Title, &data.Symptoms, &data.Diagnosis, &data.Treatment, &data.Physical_examination, &drugData, &data.Investigations, &data.Summary, &data.Name)
+		var drugData []byte
+		var summary, status sql.NullString
+		var followUpDate, finalizedAt sql.NullTime
+		var patientAge sql.NullInt64
+		err := rows.Scan(
+			&data.Id, &data.A_id, &data.Created_At, &data.Title, &data.Symptoms,
+			&data.Diagnosis, &data.Treatment, &data.Physical_examination, &drugData,
+			&data.Investigations, &summary, &data.Name, &followUpDate, &status,
+			&finalizedAt, &data.Patient_Name, &patientAge, &data.Patient_Gender,
+			&data.Patient_ID,
+		)
 		if err != nil {
-			fmt.Println("Error occured ", err.Error())
+			log.Println("Error scanning consultation data:", err)
+			ctx.IndentedJSON(500, gin.H{"Message": "Error fetching consultation data", "success": false})
 			return
 		}
 		if drugData != nil {
 			err := json.Unmarshal(drugData, &data.Drug)
 			if err != nil {
-				fmt.Println("Error at drug : ", err.Error())
+				log.Println("Error decoding prescription medicines:", err)
+				ctx.IndentedJSON(500, gin.H{"Message": "Error decoding prescription medicines", "success": false})
 				return
 			}
 		}
+		if summary.Valid {
+			data.Summary = &summary.String
+		}
+		if followUpDate.Valid {
+			data.Follow_Up_Date = &followUpDate.Time
+		}
+		if status.Valid {
+			data.Status = &status.String
+		}
+		if finalizedAt.Valid {
+			data.Finalized_At = &finalizedAt.Time
+		}
+		if patientAge.Valid {
+			data.Patient_Age = &patientAge.Int64
+		}
 		consultData = append(consultData, data)
 	}
+	if err := rows.Err(); err != nil {
+		log.Println("Error reading consultation data:", err)
+		ctx.IndentedJSON(500, gin.H{"Message": "Error fetching consultation data", "success": false})
+		return
+	}
 	ctx.IndentedJSON(200, gin.H{"Message": "Data Found", "data": consultData, "success": true})
+}
+
+func DownloadPrescriptionPDF(ctx *gin.Context) {
+	appointmentID := ctx.Param("appointmentId")
+	if _, err := uuid.Parse(appointmentID); err != nil {
+		ctx.IndentedJSON(http.StatusBadRequest, gin.H{"Message": "Invalid appointment ID", "success": false})
+		return
+	}
+	patientID := ctx.GetString("userID")
+	if strings.TrimSpace(patientID) == "" {
+		ctx.IndentedJSON(http.StatusUnauthorized, gin.H{"Message": "Unauthorized", "success": false})
+		return
+	}
+
+	query := `select c.a_id,coalesce(c.title,''),coalesce(c.symptoms,''),coalesce(c.diagnosis,''),coalesce(c.treatment,''),coalesce(c.physical_examination,''),coalesce(c.drug,'[]'::jsonb),coalesce(c.investigations,''),c.summary,c.follow_up_date,coalesce(c.status,'Draft'),c.finalized_at,c.created_at,coalesce(d.name,''),coalesce(p.name,''),p.age,coalesce(p.gender,''),coalesce(p.gen_id,'') from consultation c join appointment a on a.id=c.a_id join users d on a.d_id=d.id join users p on a.p_id=p.id where c.a_id=$1 and a.p_id=$2 and p.role='patient'`
+	var data util.PrescriptionPDFData
+	var drugData []byte
+	var summary sql.NullString
+	var followUpDate, finalizedAt sql.NullTime
+	var patientAge sql.NullInt64
+	var status string
+	err := conn.DB.QueryRow(context.Background(), query, appointmentID, patientID).Scan(
+		&data.Prescription.A_id, &data.Prescription.Title, &data.Prescription.Symptoms,
+		&data.Prescription.Diagnosis, &data.Prescription.Treatment,
+		&data.Prescription.Physical_Examination, &drugData,
+		&data.Prescription.Investigation, &summary, &followUpDate, &status,
+		&finalizedAt, &data.CreatedAt, &data.DoctorName, &data.PatientName,
+		&patientAge, &data.PatientGender, &data.PatientID,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			ctx.IndentedJSON(http.StatusNotFound, gin.H{"Message": "Prescription not found", "success": false})
+			return
+		}
+		log.Println("Error fetching prescription PDF data:", err)
+		ctx.IndentedJSON(http.StatusInternalServerError, gin.H{"Message": "Unable to fetch prescription", "success": false})
+		return
+	}
+	if err := json.Unmarshal(drugData, &data.Prescription.Drug); err != nil {
+		log.Println("Error decoding prescription medicines for PDF:", err)
+		ctx.IndentedJSON(http.StatusInternalServerError, gin.H{"Message": "Unable to read prescription medicines", "success": false})
+		return
+	}
+	if summary.Valid {
+		data.Prescription.Summary = summary.String
+	}
+	if followUpDate.Valid {
+		data.Prescription.Follow_Up_Date = &followUpDate.Time
+	}
+	data.Prescription.Status = &status
+	if finalizedAt.Valid {
+		data.Prescription.Finalized_At = &finalizedAt.Time
+	}
+	if patientAge.Valid {
+		data.PatientAge = &patientAge.Int64
+	}
+
+	pdfBytes, err := util.GeneratePrescriptionPDF(data)
+	if err != nil {
+		log.Println("Error generating prescription PDF:", err)
+		ctx.IndentedJSON(http.StatusInternalServerError, gin.H{"Message": "Unable to generate prescription PDF", "success": false})
+		return
+	}
+
+	filenameID := strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' {
+			return r
+		}
+		return '-'
+	}, appointmentID)
+	ctx.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="NexCare-Prescription-%s.pdf"`, filenameID))
+	ctx.Data(http.StatusOK, "application/pdf", pdfBytes)
 }
 
 // / fetch the lab result for the particular patient.
